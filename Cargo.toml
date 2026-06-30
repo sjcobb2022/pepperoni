@@ -1,5 +1,5 @@
 [package]
-name = "quick-start"
+name = "pepperoni"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -7,4 +7,18 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.52.3", features = ["net", "rt-multi-thread", "macros", "io-util"] }
+sqlx = { version = "0.9", features = [
+  "postgres",
+  "runtime-tokio",
+  "tls-rustls-ring-webpki",
+] }
+tokio = { version = "1.52.3", features = [
+  "net",
+  "rt-multi-thread",
+  "macros",
+  "io-util",
+] }
+
+# speed up incremental builds
+[profile.dev.package.sqlx-macros]
+opt-level = 3

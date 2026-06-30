@@ -55,7 +55,7 @@
 
         # Build the actual crate itself, reusing the dependency
         # artifacts from above.
-        my-crate = craneLib.buildPackage (
+        pepperoni = craneLib.buildPackage (
           commonArgs
           // {
             inherit cargoArtifacts;
@@ -64,7 +64,7 @@
       in {
         checks = {
           # Build the crate as part of `nix flake check` for convenience
-          inherit my-crate;
+          inherit pepperoni;
 
           # Run clippy (and deny all warnings) on the crate source,
           # again, reusing the dependency artifacts from above.
@@ -72,7 +72,7 @@
           # Note that this is done as a separate derivation so that
           # we can block the CI if there are issues here, but not
           # prevent downstream consumers from building our crate by itself.
-          my-crate-clippy = craneLib.cargoClippy (
+          pepperoni-clippy = craneLib.cargoClippy (
             commonArgs
             // {
               inherit cargoArtifacts;
@@ -80,7 +80,7 @@
             }
           );
 
-          my-crate-doc = craneLib.cargoDoc (
+          pepperoni-doc = craneLib.cargoDoc (
             commonArgs
             // {
               inherit cargoArtifacts;
@@ -91,30 +91,30 @@
           );
 
           # Check formatting
-          my-crate-fmt = craneLib.cargoFmt {
+          pepperoni-fmt = craneLib.cargoFmt {
             inherit src;
           };
 
-          my-crate-toml-fmt = craneLib.taploFmt {
+          pepperoni-toml-fmt = craneLib.taploFmt {
             src = pkgs.lib.sources.sourceFilesBySuffices src [".toml"];
             # taplo arguments can be further customized below as needed
             # taploExtraArgs = "--config ./taplo.toml";
           };
 
           # Audit dependencies
-          my-crate-audit = craneLib.cargoAudit {
+          pepperoni-audit = craneLib.cargoAudit {
             inherit src advisory-db;
           };
 
           # Audit licenses
-          my-crate-deny = craneLib.cargoDeny {
+          pepperoni-deny = craneLib.cargoDeny {
             inherit src;
           };
 
           # Run tests with cargo-nextest
           # Consider setting `doCheck = false` on `my-crate` if you do not want
           # the tests to run twice
-          my-crate-nextest = craneLib.cargoNextest (
+          pepperoni-nextest = craneLib.cargoNextest (
             commonArgs
             // {
               inherit cargoArtifacts;
@@ -126,11 +126,11 @@
         };
 
         packages = {
-          default = my-crate;
+          default = pepperoni;
         };
 
         apps.default = flake-utils.lib.mkApp {
-          drv = my-crate;
+          drv = pepperoni;
         };
 
         devShells.default = craneLib.devShell {
@@ -143,6 +143,8 @@
           # Extra inputs can be added here; cargo and rustc are provided by default.
           packages = [
             # pkgs.ripgrep
+            pkgs.rust-analyzer
+            pkgs.rustfmt
           ];
         };
       }
