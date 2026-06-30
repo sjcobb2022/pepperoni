@@ -38,3 +38,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+// We only proxy outgoing traffic to the primary.
+// We leave pg_hba.conf to do the rest.
+// We may need to call (locally) pg_basebackup or pg_rewind.

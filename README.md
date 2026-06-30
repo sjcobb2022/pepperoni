@@ -1,10 +1,10 @@
 # pepperoni
 
-pg pool proxy, like patroni.
+WIP
 
-A simple, extensible postgresql high availability proxy.
+pg pool proxy, like pgpool-ii.
 
-It manages promotion of postgres servers to primary, and supports etcd for the
-distributed KV store.
+> [!WARNING]
+> This is a learning project and should not be used ever.
 
 Made with love and without AI.
