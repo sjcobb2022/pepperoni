@@ -2,7 +2,7 @@
 
 WIP
 
-pg pool proxy, like pgpool-ii.
+a postgres HA tool
 
 > [!WARNING]
 > This is a learning project and should not be used ever.
