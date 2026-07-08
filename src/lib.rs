@@ -6,6 +6,10 @@ use std::{
 pub mod lease;
 pub mod pg;
 
+// enum variant of this logic, probably more space efficient, since we are simply mutating the
+// current state on the enum.
+pub mod enum_ver;
+
 use lease::{AcquireOutcome, LeaseClient, LeaseError, LeaseObservation, RenewOutcome, Term};
 use pg::PgCtl;
 
@@ -48,6 +52,7 @@ pub struct Leader<L: LeaseClient, P: PgCtl> {
 
 pub struct Standby<L: LeaseClient, P: PgCtl> {
     ctx: Ctx<L, P>,
+    leader_id: NodeId,
 }
 
 pub struct Demoting<L: LeaseClient, P: PgCtl> {
@@ -84,7 +89,7 @@ impl<L: LeaseClient, P: PgCtl> Tick for Init<L, P> {
                 // Do some testing.
 
                 let _ = ctx.pg.start_standby().await;
-                Ok(Standby { ctx })
+                Ok(Standby { ctx, leader_id: id })
             }
             Ok(LeaseObservation::NoLeader) | Err(LeaseError::Unreachable) | Err(_) => {
                 Err(Electing { ctx, since: now })
@@ -143,7 +148,6 @@ impl<L: LeaseClient, P: PgCtl> Tick for Promoting<L, P> {
 
 impl<L: LeaseClient, P: PgCtl> Tick for Leader<L, P> {
     type Advance = Leader<L, P>;
-
     type Retreat = Demoting<L, P>;
 
     async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
@@ -177,6 +181,7 @@ impl<L: LeaseClient, P: PgCtl> Tick for Leader<L, P> {
     }
 }
 
+// NOTE: This is ideally the most stable state for a series of nodes.
 impl<L: LeaseClient, P: PgCtl> Tick for Standby<L, P> {
     type Advance = Standby<L, P>;
     type Retreat = Electing<L, P>;
@@ -186,7 +191,10 @@ impl<L: LeaseClient, P: PgCtl> Tick for Standby<L, P> {
         match ctx.lease.observe().await {
             // TODO: We need to be able to detect a change in the leader.
             // Even if it does not pass through NoLeader.
-            Ok(LeaseObservation::Leader(_, _)) => Ok(Standby { ctx }),
+
+            // Currently, we will just move to a state with the new leader, and not do anything.
+            // We may need to handle this later.
+            Ok(LeaseObservation::Leader(id, _)) => Ok(Standby { ctx, leader_id: id }),
             _ => Err(Electing { ctx, since: now }),
         }
     }
