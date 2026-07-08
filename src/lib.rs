@@ -5,3 +5,12 @@ pub struct Config {
     pub lease_ttl: Duration,
     pub renew_margin: Duration,
 }
+
+pub enum State {
+    Init,
+    Electing,
+    Promoting,
+    Leader,
+    Standby,
+    Demoting,
+}
