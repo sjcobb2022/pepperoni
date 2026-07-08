@@ -1,5 +1,11 @@
 use std::time::{Duration, Instant};
 
+use lease::LeaseClient;
+use pg::PgCtl;
+
+pub mod lease;
+pub mod pg;
+
 #[derive(Clone, Copy)]
 pub struct Config {
     pub lease_ttl: Duration,

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 pub type Term = u64;
+pub type NodeId = u64;
 
 #[derive(Debug, Error)]
 pub enum LeaseError {
@@ -31,13 +32,13 @@ pub enum AcquireOutcome {
 #[derive(Debug, Clone, Copy)]
 pub enum RenewOutcome {
     Renewed { expires_at: Instant },
-    Lost, // no longer holder / CAS lost
+    Lost, // no longer holder
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum LeaseObservation {
     NoLeader,
-    Leader(LeaseGrant), // add holder NodeId if needed
+    Leader(NodeId, LeaseGrant),
 }
 
 pub trait LeaseClient {
