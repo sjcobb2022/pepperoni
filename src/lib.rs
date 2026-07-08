@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    convert::Infallible,
+    time::{Duration, Instant},
+};
 
 pub mod lease;
 pub mod pg;
@@ -47,12 +50,26 @@ pub struct Demoting<L: LeaseClient, P: PgCtl> {
     ctx: Ctx<L, P>,
 }
 
+pub trait Tick: Sized {
+    /// The next state when the tick succeeds.
+    type Advance;
+    /// The next state when the tick fails.
+    type Retreat;
+
+    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat>;
+}
+
 impl<L: LeaseClient, P: PgCtl> Init<L, P> {
     pub fn new(ctx: Ctx<L, P>) -> Self {
         Self { ctx }
     }
+}
 
-    pub async fn on_tick(self, now: Instant) -> Result<Standby<L, P>, Electing<L, P>> {
+impl<L: LeaseClient, P: PgCtl> Tick for Init<L, P> {
+    type Advance = Standby<L, P>;
+    type Retreat = Electing<L, P>;
+
+    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
         match ctx.lease.observe().await {
             Ok(LeaseObservation::Leader(_id, _leader)) => {
@@ -66,8 +83,11 @@ impl<L: LeaseClient, P: PgCtl> Init<L, P> {
     }
 }
 
-impl<L: LeaseClient, P: PgCtl> Electing<L, P> {
-    pub async fn campaign(self) -> Result<Promoting<L, P>, Init<L, P>> {
+impl<L: LeaseClient, P: PgCtl> Tick for Electing<L, P> {
+    type Advance = Promoting<L, P>;
+    type Retreat = Init<L, P>;
+
+    async fn tick(self, _now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
         match ctx.lease.try_acquire(ctx.cfg.lease_ttl).await {
             Ok(AcquireOutcome::Acquired(grant)) => Ok(Promoting {
@@ -78,14 +98,13 @@ impl<L: LeaseClient, P: PgCtl> Electing<L, P> {
             Ok(AcquireOutcome::Contended) | Err(_) => Err(Init { ctx }),
         }
     }
-
-    pub fn since(&self) -> Instant {
-        self.since
-    }
 }
 
-impl<L: LeaseClient, P: PgCtl> Promoting<L, P> {
-    pub async fn promote(self) -> Result<Leader<L, P>, Demoting<L, P>> {
+impl<L: LeaseClient, P: PgCtl> Tick for Promoting<L, P> {
+    type Advance = Leader<L, P>;
+    type Retreat = Demoting<L, P>;
+
+    async fn tick(self, _now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
         match ctx.pg.promote().await {
             Ok(()) => Ok(Leader {
@@ -99,27 +118,32 @@ impl<L: LeaseClient, P: PgCtl> Promoting<L, P> {
     }
 }
 
-impl<L: LeaseClient, P: PgCtl> Leader<L, P> {
-    pub async fn on_tick(mut self, now: Instant) -> Result<Leader<L, P>, Demoting<L, P>> {
-        // We renew if we are in the proper range from our expiration.
+impl<L: LeaseClient, P: PgCtl> Tick for Leader<L, P> {
+    type Advance = Leader<L, P>;
 
-        if now + self.ctx.cfg.renew_margin >= self.exp {
-            match self.ctx.lease.renew(self.ctx.cfg.lease_ttl).await {
-                Ok(RenewOutcome::Renewed { expires_at }) => self.exp = expires_at,
-                Ok(RenewOutcome::Lost) | Err(_) => return Err(Demoting { ctx: self.ctx }),
+    type Retreat = Demoting<L, P>;
+
+    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
+        // create mutable self
+        let mut this = self;
+
+        // We renew if we are in the proper range from our expiration.
+        if now + this.ctx.cfg.renew_margin >= this.exp {
+            match this.ctx.lease.renew(this.ctx.cfg.lease_ttl).await {
+                Ok(RenewOutcome::Renewed { expires_at }) => this.exp = expires_at,
+                Ok(RenewOutcome::Lost) | Err(_) => return Err(Demoting { ctx: this.ctx }),
             }
         }
 
-        Ok(self)
-    }
-
-    pub fn term(&self) -> Term {
-        self.term
+        Ok(this)
     }
 }
 
-impl<L: LeaseClient, P: PgCtl> Standby<L, P> {
-    pub async fn on_tick(self, now: Instant) -> Result<Standby<L, P>, Electing<L, P>> {
+impl<L: LeaseClient, P: PgCtl> Tick for Standby<L, P> {
+    type Advance = Standby<L, P>;
+    type Retreat = Electing<L, P>;
+
+    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
         match ctx.lease.observe().await {
             Ok(LeaseObservation::Leader(_, _)) => Ok(Standby { ctx }),
@@ -128,12 +152,15 @@ impl<L: LeaseClient, P: PgCtl> Standby<L, P> {
     }
 }
 
-impl<L: LeaseClient, P: PgCtl> Demoting<L, P> {
-    pub async fn finish(self) -> Init<L, P> {
+impl<L: LeaseClient, P: PgCtl> Tick for Demoting<L, P> {
+    type Advance = Init<L, P>;
+    type Retreat = Infallible; // We can never retreat since we just hang.
+
+    async fn tick(self, _now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
+
         // We should hang if either of these fail,
         // and let watchdog kill the process.
-
         if ctx.pg.stop().await.is_err() {
             std::future::pending::<()>().await; // never returns
         }
@@ -142,6 +169,6 @@ impl<L: LeaseClient, P: PgCtl> Demoting<L, P> {
             std::future::pending::<()>().await; // never returns
         }
 
-        Init { ctx }
+        Ok(Init { ctx })
     }
 }
