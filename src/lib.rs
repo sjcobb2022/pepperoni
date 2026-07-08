@@ -87,15 +87,23 @@ impl<L: LeaseClient, P: PgCtl> Tick for Electing<L, P> {
     type Advance = Promoting<L, P>;
     type Retreat = Init<L, P>;
 
-    async fn tick(self, _now: Instant) -> Result<Self::Advance, Self::Retreat> {
+    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
-        match ctx.lease.try_acquire(ctx.cfg.lease_ttl).await {
-            Ok(AcquireOutcome::Acquired(grant)) => Ok(Promoting {
+
+        let deadline = self.since + ctx.cfg.lease_ttl;
+
+        let Some(remaining) = deadline.checked_duration_since(now) else {
+            return Err(Init { ctx }); // already past budget, don't even try
+        };
+
+        match tokio::time::timeout(remaining, ctx.lease.try_acquire(ctx.cfg.lease_ttl)).await {
+            Ok(Ok(AcquireOutcome::Acquired(grant))) => Ok(Promoting {
                 ctx,
                 term: grant.term,
                 exp: grant.expires_at,
             }),
-            Ok(AcquireOutcome::Contended) | Err(_) => Err(Init { ctx }),
+            Ok(Ok(AcquireOutcome::Contended)) | Ok(Err(_)) => Err(Init { ctx }),
+            Err(_elapsed) => Err(Init { ctx }), // timed out past budget.
         }
     }
 }
@@ -104,16 +112,21 @@ impl<L: LeaseClient, P: PgCtl> Tick for Promoting<L, P> {
     type Advance = Leader<L, P>;
     type Retreat = Demoting<L, P>;
 
-    async fn tick(self, _now: Instant) -> Result<Self::Advance, Self::Retreat> {
+    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
-        match ctx.pg.promote().await {
-            Ok(()) => Ok(Leader {
+
+        let Some(remaining) = self.exp.checked_duration_since(now) else {
+            return Err(Demoting { ctx }); // already expired
+        };
+
+        match tokio::time::timeout(remaining, ctx.pg.promote()).await {
+            Ok(Ok(())) => Ok(Leader {
                 ctx,
                 term: self.term,
                 exp: self.exp,
             }),
-            // TODO: Handle variants? Or just log?
-            Err(_) => Err(Demoting { ctx }),
+            Ok(Err(_e)) => Err(Demoting { ctx }),
+            Err(_elapsed) => Err(Demoting { ctx }),
         }
     }
 }
