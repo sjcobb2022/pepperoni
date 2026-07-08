@@ -4,11 +4,15 @@ The core idea is relatively simple. The current HA postgres ecosystem is all
 over the place. It is my belief that every single option is trying to do too
 much. There are often simpler ways to do the complex things that we would need.
 
+We do not need to forward information to any other nodes. We do not proxy to any
+other nodes. We only proxy to our local postgres instance. We let HAProxy handle
+the routing.
+
 Ideas that to consider:
 
 - On postgresql service fail, we should also fail. Using systemd PartOf would
   allow for that. Allows us to start "fresh" each instance. Same instance goes
-  for startup.
+  for startup. Having to fail when postgres fails is non-ideal though.
 - Assume standby as much as possible. We do not want to be the primary, as it is
   complicated. By avoiding primary we can simplify our logic.
 - Repeat re-election campaigns to ensure that we consistently have a leader.
