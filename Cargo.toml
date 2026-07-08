@@ -12,6 +12,7 @@ sqlx = { version = "0.9", features = [
   "runtime-tokio",
   "tls-rustls-ring-webpki",
 ] }
+thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = [
   "net",
   "rt-multi-thread",

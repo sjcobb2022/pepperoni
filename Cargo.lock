@@ -693,6 +693,7 @@ name = "pepperoni"
 version = "0.1.0"
 dependencies = [
  "sqlx",
+ "thiserror",
  "tokio",
 ]
 
