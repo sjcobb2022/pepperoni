@@ -9,8 +9,12 @@ pub mod pg;
 use lease::{AcquireOutcome, LeaseClient, LeaseError, LeaseObservation, RenewOutcome, Term};
 use pg::PgCtl;
 
+use crate::lease::NodeId;
+
 #[derive(Clone, Copy)]
 pub struct Config {
+    /// The current node's id. Static and set by the user.
+    pub id: NodeId,
     pub lease_ttl: Duration,
     pub renew_margin: Duration,
 }
@@ -72,7 +76,13 @@ impl<L: LeaseClient, P: PgCtl> Tick for Init<L, P> {
     async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
         match ctx.lease.observe().await {
-            Ok(LeaseObservation::Leader(_id, _leader)) => {
+            Ok(LeaseObservation::Leader(id, _leader)) => {
+                // TODO: Handle if the ID is the current nodes ID. Unlikely but still possible.
+                // Would need the entire machine to die and reboot within the lease period.
+                // Possible with a large lease.
+                // If we are certain that watchdog kills the process this may be unnecessary.
+                // Do some testing.
+
                 let _ = ctx.pg.start_standby().await;
                 Ok(Standby { ctx })
             }
@@ -140,11 +150,26 @@ impl<L: LeaseClient, P: PgCtl> Tick for Leader<L, P> {
         // create mutable self
         let mut this = self;
 
+        // TODO: Validate if this is the same.
+        if this.exp.checked_duration_since(now).is_none() {
+            return Err(Demoting { ctx: this.ctx }); // already expired
+        }
+
+        if now >= this.exp {
+            return Err(Demoting { ctx: this.ctx }); // already expired
+        }
+
         // We renew if we are in the proper range from our expiration.
         if now + this.ctx.cfg.renew_margin >= this.exp {
-            match this.ctx.lease.renew(this.ctx.cfg.lease_ttl).await {
-                Ok(RenewOutcome::Renewed { expires_at }) => this.exp = expires_at,
-                Ok(RenewOutcome::Lost) | Err(_) => return Err(Demoting { ctx: this.ctx }),
+            let remaining = this.exp.saturating_duration_since(now);
+
+            let renew_fut = this.ctx.lease.renew(this.ctx.cfg.lease_ttl);
+
+            match tokio::time::timeout(remaining, renew_fut).await {
+                Ok(Ok(RenewOutcome::Renewed { expires_at })) => this.exp = expires_at,
+                Ok(Ok(RenewOutcome::Lost)) | Ok(Err(_)) | Err(_) => {
+                    return Err(Demoting { ctx: this.ctx })
+                }
             }
         }
 
@@ -159,6 +184,8 @@ impl<L: LeaseClient, P: PgCtl> Tick for Standby<L, P> {
     async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
         match ctx.lease.observe().await {
+            // TODO: We need to be able to detect a change in the leader.
+            // Even if it does not pass through NoLeader.
             Ok(LeaseObservation::Leader(_, _)) => Ok(Standby { ctx }),
             _ => Err(Electing { ctx, since: now }),
         }
@@ -167,7 +194,7 @@ impl<L: LeaseClient, P: PgCtl> Tick for Standby<L, P> {
 
 impl<L: LeaseClient, P: PgCtl> Tick for Demoting<L, P> {
     type Advance = Init<L, P>;
-    type Retreat = Infallible; // We can never retreat since we just hang.
+    type Retreat = Infallible; // We can never retreat since we just hang if we fail.
 
     async fn tick(self, _now: Instant) -> Result<Self::Advance, Self::Retreat> {
         let mut ctx = self.ctx;
