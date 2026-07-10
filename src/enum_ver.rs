@@ -31,6 +31,8 @@ impl State {
                         // Possible with a large lease.
                         // If we are certain that watchdog kills the process this may be unnecessary.
                         // Do some testing.
+                        // Potentially possible if the electing cycle fails out early due to slow
+                        // processing.
 
                         let _ = ctx.pg.start_standby().await;
                         return Self::Standby { leader: id };
@@ -48,6 +50,15 @@ impl State {
                     return Self::Init; // already past budget, don't even try
                 };
 
+                // TODO: Perhaps we CAN try acquire this, and demote on fail instead of going to
+                // init.
+                //
+                // If we were to add a timeout here, with the remaining time, we do not need to
+                // validate whether we are leader or not.
+
+                // We can relatively easily check in init if we are the current holder of the lease and then move
+                // to promoting which then be the happy path.
+
                 return match ctx.lease.try_acquire(ctx.cfg.lease_ttl).await {
                     Ok(AcquireOutcome::Acquired(grant)) => Self::Promoting {
                         term: grant.term,
@@ -62,6 +73,9 @@ impl State {
                     return Self::Demoting; // already expired
                 };
 
+                // NOTE: We are not really bothered if the promotion fails since we fallback to
+                // demoting on failure. Demoting fails hard, and therefore if postgres is busy
+                // it the box will be killed with watchdog.
                 match tokio::time::timeout(remaining, ctx.pg.promote()).await {
                     Ok(Ok(())) => Self::Leader { term, expiry },
                     Ok(Err(_e)) => Self::Demoting,
@@ -110,8 +124,9 @@ impl State {
             }
 
             Self::Demoting => {
-                // We should hang if either of these fail,
-                // and let watchdog kill the process.
+                // Should hang if demoting postgres or the lease fails and let watchdog kill the process.
+                // Watchdog will also catch if the await hangs indefinitely.
+
                 if ctx.pg.stop().await.is_err() {
                     std::future::pending::<()>().await; // never returns
                 }
