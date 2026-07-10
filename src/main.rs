@@ -6,6 +6,14 @@ use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // NOTE: When implementing the state machines we should make our happy paths fast (e.g. fast
+    // promoting), and the rest can be relatively "slow" (configurable per-loop type thing)
+    // Alternatively to keep things in order (so that we do not get too out of sync with other nodes),
+    // we could just have a static update interval.
+    // Perhaps we could trigger fast in the loop until we reach a stable state (Stanby/Leader), and
+    // then trigger every x seconds. This also means that if we get stuck in an infinite loop,
+    // watchdog will kill the system which is actually to be expected.
+
     let listen_addr = env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:8081".to_string());
