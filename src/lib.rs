@@ -107,18 +107,17 @@ impl<L: LeaseClient, P: PgCtl> Tick for Electing<L, P> {
 
         let deadline = self.since + ctx.cfg.lease_ttl;
 
-        let Some(remaining) = deadline.checked_duration_since(now) else {
+        if deadline.checked_duration_since(now).is_none() {
             return Err(Init { ctx }); // already past budget, don't even try
         };
 
-        match tokio::time::timeout(remaining, ctx.lease.try_acquire(ctx.cfg.lease_ttl)).await {
-            Ok(Ok(AcquireOutcome::Acquired(grant))) => Ok(Promoting {
+        match ctx.lease.try_acquire(ctx.cfg.lease_ttl).await {
+            Ok(AcquireOutcome::Acquired(grant)) => Ok(Promoting {
                 ctx,
                 term: grant.term,
                 exp: grant.expires_at,
             }),
-            Ok(Ok(AcquireOutcome::Contended)) | Ok(Err(_)) => Err(Init { ctx }),
-            Err(_elapsed) => Err(Init { ctx }), // timed out past budget.
+            Ok(AcquireOutcome::Contended) | Err(_) => Err(Init { ctx }),
         }
     }
 }
