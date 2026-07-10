@@ -2,7 +2,9 @@
 
 WIP
 
-a postgres HA tool
+a postgres HA tool.
+
+made for on device replication and failover.
 
 > [!WARNING]
 > This is a learning project and should not be used ever.
