@@ -154,11 +154,6 @@ impl<L: LeaseClient, P: PgCtl> Tick for Leader<L, P> {
         // create mutable self
         let mut this = self;
 
-        // TODO: Validate if this is the same.
-        if this.exp.checked_duration_since(now).is_none() {
-            return Err(Demoting { ctx: this.ctx }); // already expired
-        }
-
         if now >= this.exp {
             return Err(Demoting { ctx: this.ctx }); // already expired
         }
