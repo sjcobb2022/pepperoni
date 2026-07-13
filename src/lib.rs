@@ -29,6 +29,8 @@ pub struct Ctx<L: LeaseClient, P: PgCtl> {
     pub cfg: Config,
 }
 
+// TODO: SansIO
+
 pub enum State {
     Init,
     Electing { since: Instant },

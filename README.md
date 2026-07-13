@@ -4,6 +4,8 @@ WIP
 
 a postgres HA tool.
 
+sans-io, state machine
+
 made for on device replication and failover.
 
 > [!WARNING]
