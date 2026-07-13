@@ -1,26 +1,26 @@
-use std::{
-    convert::Infallible,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 pub mod lease;
+pub mod mock;
 pub mod pg;
+pub mod proxy;
 
-// enum variant of this logic, probably more space efficient, since we are simply mutating the
-// current state on the enum.
-pub mod enum_ver;
-
-use lease::{AcquireOutcome, LeaseClient, LeaseError, LeaseObservation, RenewOutcome, Term};
+use lease::{AcquireOutcome, LeaseClient, LeaseObservation, NodeId, RenewOutcome, Term};
 use pg::PgCtl;
+use tokio::time::timeout;
 
-use crate::lease::NodeId;
+use crate::pg::PgError;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Config {
     /// The current node's id. Static and set by the user.
     pub id: NodeId,
+    pub timeout: Duration,
     pub lease_ttl: Duration,
     pub renew_margin: Duration,
+    pub drain_timeout: Duration,
+    pub drain_refresh: Duration,
+    pub watchdog_timeout: Duration,
 }
 
 pub struct Ctx<L: LeaseClient, P: PgCtl> {
@@ -29,188 +29,135 @@ pub struct Ctx<L: LeaseClient, P: PgCtl> {
     pub cfg: Config,
 }
 
-pub struct Init<L: LeaseClient, P: PgCtl> {
-    ctx: Ctx<L, P>,
+pub enum State {
+    Init,
+    Electing { since: Instant },
+    Promoting { term: Term, expiry: Instant },
+    Leader { term: Term, expiry: Instant },
+    Standby { leader: NodeId },
+    Demoting,
 }
 
-pub struct Electing<L: LeaseClient, P: PgCtl> {
-    ctx: Ctx<L, P>,
-    since: Instant,
+#[derive(Debug)]
+pub enum TickError {
+    StandbySetupFailed(PgError),
 }
 
-pub struct Promoting<L: LeaseClient, P: PgCtl> {
-    ctx: Ctx<L, P>,
-    term: Term,
-    exp: Instant,
-}
+impl State {
+    pub async fn tick<L: LeaseClient, P: PgCtl>(self, ctx: &mut Ctx<L, P>, now: Instant) -> Self {
+        match self {
+            Self::Init => {
+                match ctx.lease.observe().await {
+                    Ok(LeaseObservation::Leader(id)) => {
+                        // If we are the leader move to demoting since that should not be the case.
+                        if id.0 == ctx.cfg.id.0 {
+                            return Self::Demoting;
+                        }
 
-pub struct Leader<L: LeaseClient, P: PgCtl> {
-    ctx: Ctx<L, P>,
-    term: Term,
-    exp: Instant,
-}
-
-pub struct Standby<L: LeaseClient, P: PgCtl> {
-    ctx: Ctx<L, P>,
-    leader_id: NodeId,
-}
-
-pub struct Demoting<L: LeaseClient, P: PgCtl> {
-    ctx: Ctx<L, P>,
-}
-
-pub trait Tick: Sized {
-    /// The next state when the tick succeeds.
-    type Advance;
-    /// The next state when the tick fails.
-    type Retreat;
-
-    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat>;
-}
-
-impl<L: LeaseClient, P: PgCtl> Init<L, P> {
-    pub fn new(ctx: Ctx<L, P>) -> Self {
-        Self { ctx }
-    }
-}
-
-impl<L: LeaseClient, P: PgCtl> Tick for Init<L, P> {
-    type Advance = Standby<L, P>;
-    type Retreat = Electing<L, P>;
-
-    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
-        let mut ctx = self.ctx;
-        match ctx.lease.observe().await {
-            Ok(LeaseObservation::Leader(id, _leader)) => {
-                // TODO: Handle if the ID is the current nodes ID. Unlikely but still possible.
-                // Would need the entire machine to die and reboot within the lease period.
-                // Possible with a large lease.
-                // If we are certain that watchdog kills the process this may be unnecessary.
-                // Do some testing.
-
-                let _ = ctx.pg.start_standby().await;
-                Ok(Standby { ctx, leader_id: id })
-            }
-            Ok(LeaseObservation::NoLeader) | Err(LeaseError::Unreachable) | Err(_) => {
-                Err(Electing { ctx, since: now })
-            }
-        }
-    }
-}
-
-impl<L: LeaseClient, P: PgCtl> Tick for Electing<L, P> {
-    type Advance = Promoting<L, P>;
-    type Retreat = Init<L, P>;
-
-    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
-        let mut ctx = self.ctx;
-
-        let deadline = self.since + ctx.cfg.lease_ttl;
-
-        if deadline.checked_duration_since(now).is_none() {
-            return Err(Init { ctx }); // already past budget, don't even try
-        };
-
-        match ctx.lease.try_acquire(ctx.cfg.lease_ttl).await {
-            Ok(AcquireOutcome::Acquired(grant)) => Ok(Promoting {
-                ctx,
-                term: grant.term,
-                exp: grant.expires_at,
-            }),
-            Ok(AcquireOutcome::Contended) | Err(_) => Err(Init { ctx }),
-        }
-    }
-}
-
-impl<L: LeaseClient, P: PgCtl> Tick for Promoting<L, P> {
-    type Advance = Leader<L, P>;
-    type Retreat = Demoting<L, P>;
-
-    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
-        let mut ctx = self.ctx;
-
-        let Some(remaining) = self.exp.checked_duration_since(now) else {
-            return Err(Demoting { ctx }); // already expired
-        };
-
-        match tokio::time::timeout(remaining, ctx.pg.promote()).await {
-            Ok(Ok(())) => Ok(Leader {
-                ctx,
-                term: self.term,
-                exp: self.exp,
-            }),
-            Ok(Err(_e)) => Err(Demoting { ctx }),
-            Err(_elapsed) => Err(Demoting { ctx }),
-        }
-    }
-}
-
-impl<L: LeaseClient, P: PgCtl> Tick for Leader<L, P> {
-    type Advance = Leader<L, P>;
-    type Retreat = Demoting<L, P>;
-
-    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
-        // create mutable self
-        let mut this = self;
-
-        if now >= this.exp {
-            return Err(Demoting { ctx: this.ctx }); // already expired
-        }
-
-        // We renew if we are in the proper range from our expiration.
-        if now + this.ctx.cfg.renew_margin >= this.exp {
-            let remaining = this.exp.saturating_duration_since(now);
-
-            let renew_fut = this.ctx.lease.renew(this.ctx.cfg.lease_ttl);
-
-            match tokio::time::timeout(remaining, renew_fut).await {
-                Ok(Ok(RenewOutcome::Renewed { expires_at })) => this.exp = expires_at,
-                Ok(Ok(RenewOutcome::Lost)) | Ok(Err(_)) | Err(_) => {
-                    return Err(Demoting { ctx: this.ctx })
+                        return match ctx.pg.start_standby().await {
+                            Ok(()) => Self::Standby { leader: id },
+                            // TODO: If something in postgres is misconfigured and it fails to
+                            // start, we may end up looping indefinitely.
+                            // The alternative would be to force a crash/restart by stalling indefinitely.
+                            Err(PgError::Command(command)) => {
+                                // TODO: Return error
+                                panic!("Test")
+                            }
+                            _ => Self::Init,
+                        };
+                    }
+                    _ => return Self::Electing { since: now },
                 }
             }
+
+            Self::Electing { since } => {
+                let deadline = since + ctx.cfg.lease_ttl;
+
+                let Some(remaining) = deadline.checked_duration_since(now) else {
+                    return Self::Init; // already past budget, don't even try
+                };
+
+                return match timeout(remaining, ctx.lease.try_acquire(ctx.cfg.lease_ttl)).await {
+                    Ok(Ok(AcquireOutcome::Acquired(grant))) => Self::Promoting {
+                        term: grant.term,
+                        expiry: grant.expires_at,
+                    },
+                    // If we timeout, or we error for whatever reason, we should re-init our state.
+                    _ => Self::Init,
+                };
+            }
+
+            Self::Promoting { term, expiry } => {
+                let Some(remaining) = expiry.checked_duration_since(now) else {
+                    return Self::Demoting; // already expired
+                };
+
+                // NOTE: We are not really bothered if the promotion fails since we fallback to
+                // demoting on failure. Demoting fails hard, and therefore if postgres is busy
+                // it will be killed by watchdog.
+                match timeout(remaining, ctx.pg.promote()).await {
+                    Ok(Ok(())) => Self::Leader { term, expiry },
+                    _ => Self::Demoting,
+                }
+            }
+
+            Self::Leader { term, expiry } => {
+                if now >= expiry {
+                    return Self::Demoting; // already expired
+                }
+
+                // We renew if we are in the proper range from our expiration.
+                if now + ctx.cfg.renew_margin >= expiry {
+                    let remaining = expiry.saturating_duration_since(now);
+
+                    let renew_fut = ctx.lease.renew(ctx.cfg.lease_ttl);
+
+                    match timeout(remaining, renew_fut).await {
+                        Ok(Ok(RenewOutcome::Renewed { expires_at })) => {
+                            return Self::Leader {
+                                term,
+                                expiry: expires_at,
+                            }
+                        }
+                        Ok(Ok(RenewOutcome::Lost)) | Ok(Err(_)) | Err(_) => {
+                            return Self::Demoting;
+                        }
+                    }
+                }
+
+                Self::Leader { term, expiry }
+            }
+
+            Self::Standby { leader } => {
+                // If we are in standby but we are the leader, then we should demote.
+                if leader.0 == ctx.cfg.id.0 {
+                    return Self::Demoting;
+                }
+
+                match ctx.lease.observe().await {
+                    // Update state to new leader regardless
+                    Ok(LeaseObservation::Leader(id)) => Self::Standby { leader: id },
+                    // Go to re-election if no leader
+                    Ok(LeaseObservation::NoLeader) => Self::Electing { since: now },
+                    // Otherwise go back to init since we don't know the status.
+                    _ => Self::Init,
+                }
+            }
+
+            Self::Demoting => {
+                // Should hang if demoting postgres or the lease fails and let watchdog kill the process.
+                // Watchdog will also catch if the await hangs indefinitely.
+
+                if ctx.pg.stop().await.is_err() {
+                    std::future::pending::<()>().await; // never returns
+                }
+
+                if ctx.lease.release().await.is_err() {
+                    std::future::pending::<()>().await; // never returns
+                }
+
+                Self::Init
+            }
         }
-
-        Ok(this)
-    }
-}
-
-// NOTE: This is ideally the most stable state for a series of nodes.
-impl<L: LeaseClient, P: PgCtl> Tick for Standby<L, P> {
-    type Advance = Standby<L, P>;
-    type Retreat = Electing<L, P>;
-
-    async fn tick(self, now: Instant) -> Result<Self::Advance, Self::Retreat> {
-        let mut ctx = self.ctx;
-        match ctx.lease.observe().await {
-            // TODO: We need to be able to detect a change in the leader.
-            // Even if it does not pass through NoLeader.
-
-            // Currently, we will just move to a state with the new leader, and not do anything.
-            // We may need to handle this later.
-            Ok(LeaseObservation::Leader(id, _)) => Ok(Standby { ctx, leader_id: id }),
-            _ => Err(Electing { ctx, since: now }),
-        }
-    }
-}
-
-impl<L: LeaseClient, P: PgCtl> Tick for Demoting<L, P> {
-    type Advance = Init<L, P>;
-    type Retreat = Infallible; // We can never retreat since we just hang if we fail.
-
-    async fn tick(self, _now: Instant) -> Result<Self::Advance, Self::Retreat> {
-        let mut ctx = self.ctx;
-
-        // We should hang if either of these fail,
-        // and let watchdog kill the process.
-        if ctx.pg.stop().await.is_err() {
-            std::future::pending::<()>().await; // never returns
-        }
-
-        if ctx.lease.release().await.is_err() {
-            std::future::pending::<()>().await; // never returns
-        }
-
-        Ok(Init { ctx })
     }
 }
