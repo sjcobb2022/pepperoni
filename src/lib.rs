@@ -1,20 +1,35 @@
 use std::time::{Duration, Instant};
 
-use crate::{
-    lease::{AcquireOutcome, LeaseError, LeaseGrant, LeaseObservation, NodeId, RenewOutcome, Term},
-    pg::PgError,
-};
+pub struct NodeId(String);
 
-pub mod lease;
-pub mod mock;
-pub mod pg;
-pub mod proxy;
+impl PartialEq for NodeId {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
 
-// TODO: SansIO
+pub type Term = u64;
 
+pub struct Config {
+    /// The current node's id. Static and set by the user.
+    pub id: NodeId,
+    /// How often standby re-checks who the leader is.
+    pub timeout: Duration,
+    /// How long a lease/promotion lasts once acquired.
+    pub lease_ttl: Duration,
+    /// How early before expiry we start trying to renew.
+    pub renew_margin: Duration,
+}
+
+// TODO: Remove instant processing. Having to have knowledge of the current immediate time is not
+// ideal, honestly it would be easier to simply deal in durations and timeouts, such that things are
+// triggered as necessary. Therefore we should transition to only be duration based.
 pub enum State {
+    /// Initial state. Will only transition to [State::ObservingFromInit].
     Init,
+    /// Initial lease observation state, observation in pending.
     ObservingFromInit,
+    /// Re-observing state from standby.
     ObservingFromStandby {
         leader: NodeId,
     },
@@ -47,36 +62,55 @@ pub enum State {
     Stuck,
 }
 
-// TODO: Remove dependency on lease stuff here.
-// We can do one of two things.
-// Create more states which we trigger on, such as AcquireSuccess or AcquireFailure, but that just
-// increase the amount of individual edge cases that we need to handle.
-// The alternative would be to construct our own LeaseObservation types here, which external things
-// depend on. That would make it more "pure".
-// Honestly I am more in favor of separate states as that means we have no dependencies at all.
+// TODO: Remove instant processing. Having to have knowledge of the current immediate time is not
+// ideal, honestly it would be easier to simply deal in durations and timeouts, such that things are
+// triggered as necessary. Therefore we should transition to only be duration based.
 pub enum Event {
+    /// Time has passed, so the state must be re-evaluated.
     Now(Instant),
 
+    // Observation
+    /// The lease is reachable and a leader is present.
     ObservedLeader(NodeId),
+    /// The lease is reachable and no leader is present
     ObservedNoLeader,
+    /// The lease is unreachable.
     ObserveFailed,
 
+    // Lease acquiring
+    /// Acquiring a lease has succeeded.
     AcquireSucceeded { term: Term, expiry: Instant },
+    /// Acquiring a lease has failed.
     AcquireFailed,
 
+    // Promoting
+    /// Promotion has succeeded.
     PromoteSucceeded { term: Term },
+    /// Promotion has failed.
     PromoteFailed { term: Term },
 
+    // Renewing
+    /// Lease renewal has succeeded
     RenewSucceeded { term: Term, expiry: Instant },
+    /// Lease renewal has not succeeded.
     RenewFailed { term: Term },
 
+    // Standby
+    /// A node has been started in standby successfully.
     StandbyStarted,
+    /// A node has failed to start.
     StandbyStartFailed,
 
+    // Stopping
+    /// A node has stopped succesfully.
     Stopped,
+    /// A node has failed to stop.
     StopFailed,
 
+    // Release
+    /// A lease has been released voluntarily.
     Released,
+    /// Releasing a lease has failed.
     ReleaseFailed,
 }
 
