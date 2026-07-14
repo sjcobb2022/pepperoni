@@ -2,11 +2,12 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-pub type Term = u64;
 #[derive(Debug, Clone)]
 pub struct NodeId(pub String);
 
-#[derive(Debug, Error)]
+pub type Term = u64;
+
+#[derive(Debug, Clone, Error)]
 pub enum LeaseError {
     #[error("store unreachable")]
     Unreachable,
