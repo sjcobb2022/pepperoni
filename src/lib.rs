@@ -15,7 +15,9 @@ pub mod proxy;
 pub enum State {
     Init,
     ObservingFromInit,
-    ObservingFromStandby,
+    ObservingFromStandby {
+        leader: NodeId,
+    },
     AcquiringLease {
         since: Instant,
         deadline: Instant,
@@ -40,7 +42,7 @@ pub enum State {
         leader: NodeId,
     },
     Demoting,
-    ReleaseingLease,
+    ReleasingLease,
     // terminal state, we should let watchdog kill
     Stuck,
 }
@@ -54,19 +56,28 @@ pub enum State {
 // Honestly I am more in favor of separate states as that means we have no dependencies at all.
 pub enum Event {
     Now(Instant),
-    LeaseObserved(Result<LeaseObservation, LeaseError>),
-    Acquired(Result<AcquireOutcome, LeaseError>),
-    Promoted {
-        term: Term,
-        result: Result<(), LeaseError>,
-    },
-    Renewed {
-        term: Term,
-        result: Result<RenewOutcome, LeaseError>,
-    },
-    StandbyStarted(Result<(), PgError>),
-    Stopped(Result<(), PgError>),
-    Released(Result<(), LeaseError>),
+
+    ObservedLeader(NodeId),
+    ObservedNoLeader,
+    ObserveFailed,
+
+    AcquireSucceeded { term: Term, expiry: Instant },
+    AcquireFailed,
+
+    PromoteSucceeded { term: Term },
+    PromoteFailed { term: Term },
+
+    RenewSucceeded { term: Term, expiry: Instant },
+    RenewFailed { term: Term },
+
+    StandbyStarted,
+    StandbyStartFailed,
+
+    Stopped,
+    StopFailed,
+
+    Released,
+    ReleaseFailed,
 }
 
 pub enum Command {
@@ -84,218 +95,178 @@ pub fn step(state: State, event: Event) -> (State, Vec<Command>) {
     use State::*;
     // TODO: pass directly into function
     let now = Instant::now();
+    let renew_margin = Duration::from_secs(1);
 
     match (state, event) {
+        // Init
         // If we get triggered immediately, we should attempt to observe the current lease
         (Init, Event::Now(_)) => (ObservingFromInit, vec![Command::ObserveLease]),
         // otherwise, we do nothing.
         (s @ Init, _) => (s, vec![]),
 
+        // ObservingFromInit
         // If we are observing, and we are the leader, then we should stop since that is a failure
-        (ObservingFromInit, Event::LeaseObserved(Ok(LeaseObservation::Leader(id))))
-        // TODO: cfg.id
-            if id.0 == "DUMMY_REPLACE" =>
-        {
+        (ObservingFromInit, Event::ObservedLeader(id)) if todo!("id.0 == cfg.id") => {
             (Demoting, vec![Command::StopPg])
         }
-
         // otherwise, we move into standby with the leader.
-        (ObservingFromInit, Event::LeaseObserved(Ok(LeaseObservation::Leader(id)))) => {
+        (ObservingFromInit, Event::ObservedLeader(id)) => {
             (StartingStandby { leader: id }, vec![Command::StartStandby])
         }
-
-        (ObservingFromInit, Event::LeaseObserved(_)) => {
+        (ObservingFromInit, Event::ObservedNoLeader)
+        | (ObservingFromInit, Event::ObserveFailed) => {
             // If we either have failed to observe, or there is no leader, we should try and acquire
             // the lease.
 
-            // let deadline = now + todo!();
+            let deadline = now + todo!("cfg.lease_ttl");
             (
                 AcquiringLease {
                     since: now,
                     deadline: now,
                 },
                 vec![
-                    // Command::TryAcquireLease { ttl: todo!("cfg.lease_ttl") },
-                    // Command::ArmTimer(deadline),
+                    Command::TryAcquireLease {
+                        ttl: todo!("cfg.lease_ttl"),
+                    },
+                    Command::ArmTimer(deadline),
                 ],
             )
         }
-
         (s @ ObservingFromInit, _) => (s, vec![]),
 
-        (ObservingFromStandby, Event::LeaseObserved(Ok(LeaseObservation::Leader(id)))) => (
+        // ObservingFromStandby
+        (ObservingFromStandby { .. }, Event::ObservedLeader(id)) => (
             Standby { leader: id },
-            vec![
-                // Command::ArmTimer(now + todo!("cfg.timeout"))
-            ],
+            vec![Command::ArmTimer(now + todo!("cfg.timeout"))],
         ),
-
-        (
-            ObservingFromStandby,
-            Event::LeaseObserved(Ok(LeaseObservation::NoLeader)),
-        ) => {
-            // let deadline = now + todo!("cfg.lease_ttl");
+        (ObservingFromStandby { .. }, Event::ObservedNoLeader) => {
+            let deadline = now + todo!("cfg.lease_ttl");
             (
-                AcquiringLease { since: now, deadline: now},
+                AcquiringLease {
+                    since: now,
+                    deadline: now,
+                },
                 vec![
-                    // Command::TryAcquireLease { ttl: todo!("cfg.lease_ttl") },
-                    // Command::ArmTimer(deadline),
+                    Command::TryAcquireLease {
+                        ttl: todo!("cfg.lease_ttl"),
+                    },
+                    Command::ArmTimer(deadline),
                 ],
             )
-        },
+        }
+        (ObservingFromStandby { .. }, Event::ObserveFailed) => (Init, vec![Command::ArmTimer(now)]),
+        (s @ ObservingFromStandby { .. }, _) => (s, vec![]),
 
-        (ObservingFromStandby, Event::LeaseObserved(Err(_))) => (Init, vec![Command::ArmTimer(now)]),
-
-
-        (s @ ObservingFromStandby, _) => (s, vec![]),
-
+        // AcquiringLease
         (AcquiringLease { deadline, .. }, Event::Now(t)) if t >= deadline => {
             (Init, vec![Command::ArmTimer(t)])
         }
-
         (s @ AcquiringLease { .. }, Event::Now(_)) => (s, vec![]),
-
-        (
-            AcquiringLease { .. },
-            Event::Acquired(Ok(AcquireOutcome::Acquired(LeaseGrant { term, expires_at })))
-        ) => (
-            Promoting { term, expiry: expires_at },
-            vec![Command::Promote { term }],
-        ),
-
-        (AcquiringLease { .. }, Event::Acquired(_)) => (Init, vec![Command::ArmTimer(now)]),
-
+        (AcquiringLease { .. }, Event::AcquireSucceeded { term, expiry }) => {
+            (Promoting { term, expiry }, vec![Command::Promote { term }])
+        }
+        (AcquiringLease { .. }, Event::AcquireFailed) => (Init, vec![Command::ArmTimer(now)]),
         (s @ AcquiringLease { .. }, _) => (s, vec![]),
 
+        // Promoting
+        (Promoting { expiry, .. }, Event::Now(t)) if t >= expiry => {
+            (Demoting, vec![Command::StopPg])
+        }
+        (s @ Promoting { .. }, Event::Now(_)) => (s, vec![]),
+        (Promoting { term, expiry }, Event::PromoteSucceeded { term: t }) if t == term => (
+            Leader { term, expiry },
+            vec![Command::ArmTimer(renew_deadline(
+                expiry,
+                todo!("cfg.renew_margin"),
+            ))],
+        ),
+        (Promoting { term, .. }, Event::PromoteFailed { term: t }) if t == term => {
+            (Demoting, vec![Command::StopPg])
+        }
+        (s @ Promoting { .. }, _) => (s, vec![]),
+
+        // Leader
+        (Leader { expiry, .. }, Event::Now(t)) if t >= expiry => (Demoting, vec![Command::StopPg]),
+        (Leader { term, expiry }, Event::Now(t)) if t + todo!("cfg.renew_margin") >= expiry => (
+            Renewing {
+                term,
+                expiry,
+                deadline: expiry,
+            },
+            vec![
+                Command::RenewLease {
+                    term,
+                    ttl: todo!("config.lease_ttl"),
+                },
+                Command::ArmTimer(expiry),
+            ],
+        ),
+        (Leader { term, expiry }, Event::Now(_)) => (
+            Leader { term, expiry },
+            vec![Command::ArmTimer(renew_deadline(
+                expiry,
+                todo!("cfg.renew_margin"),
+            ))],
+        ),
+        (s @ Leader { .. }, _) => (s, vec![]),
+
+        // Renewing
+        (Renewing { deadline, .. }, Event::Now(t)) if t >= deadline => {
+            (Demoting, vec![Command::StopPg])
+        }
+
+        (s @ Renewing { .. }, Event::Now(_)) => (s, vec![]),
+
+        (Renewing { term, .. }, Event::RenewSucceeded { term: t, expiry }) if t == term => (
+            Leader { term, expiry },
+            vec![Command::ArmTimer(renew_deadline(
+                expiry,
+                todo!("cfg.renew_margin"),
+            ))],
+        ),
+
+        (Renewing { term, .. }, Event::RenewFailed { term: t }) if t == term => {
+            (Demoting, vec![Command::StopPg])
+        }
+        (s @ Renewing { .. }, _) => (s, vec![]),
+
+        // StartingStandby
+        (StartingStandby { leader }, Event::StandbyStarted) => (
+            Standby { leader },
+            vec![Command::ArmTimer(now + todo!("cfg.timeout"))],
+        ),
+
+        (StartingStandby { .. }, Event::StandbyStartFailed) => (Init, vec![Command::ArmTimer(now)]),
+
+        (s @ StartingStandby { .. }, _) => (s, vec![]),
+
+        // Standby
+        (Standby { leader }, Event::Now(_)) if todo!("leader.0 == cfg.id.0") => {
+            (Demoting, vec![Command::StopPg])
+        }
+
+        (Standby { leader }, Event::Now(_)) => {
+            (ObservingFromStandby { leader }, vec![Command::ObserveLease])
+        }
+
+        (s @ Standby { .. }, _) => (s, vec![]),
+
+        // Demoting
+        (Demoting, Event::Stopped) => (ReleasingLease, vec![Command::ReleaseLease]),
+        (Demoting, Event::StopFailed) => (Stuck, vec![]),
+        (s @ Demoting, _) => (s, vec![]),
+
+        // ReleasingLease
+        (ReleasingLease, Event::Released) => (Init, vec![Command::ArmTimer(now)]),
+        (ReleasingLease, Event::ReleaseFailed) => (Stuck, vec![]),
+        (s @ ReleasingLease, _) => (s, vec![]),
+
+        // Stuck
         (s @ Stuck, _) => (s, vec![]),
         _ => todo!(),
     }
 }
 
-// pub enum State {
-//     Init,
-//     Electing { since: Instant },
-//     Promoting { term: Term, expiry: Instant },
-//     Leader { term: Term, expiry: Instant },
-//     Standby { leader: NodeId },
-//     Demoting,
-// }
-
-// impl State {
-//     pub async fn tick<L: LeaseClient, P: PgCtl>(self, ctx: &mut Ctx<L, P>, now: Instant) -> Self {
-//         match self {
-//             Self::Init => {
-//                 match ctx.lease.observe().await {
-//                     Ok(LeaseObservation::Leader(id)) => {
-//                         // If we are the leader move to demoting since that should not be the case.
-//                         if id.0 == ctx.cfg.id.0 {
-//                             return Self::Demoting;
-//                         }
-//
-//                         return match ctx.pg.start_standby().await {
-//                             Ok(()) => Self::Standby { leader: id },
-//                             // TODO: If something in postgres is misconfigured and it fails to
-//                             // start, we may end up looping indefinitely.
-//                             // The alternative would be to force a crash/restart by stalling indefinitely.
-//                             Err(PgError::Command(command)) => {
-//                                 // TODO: Return error
-//                                 panic!("Test")
-//                             }
-//                             _ => Self::Init,
-//                         };
-//                     }
-//                     _ => return Self::Electing { since: now },
-//                 }
-//             }
-//
-//             Self::Electing { since } => {
-//                 let deadline = since + ctx.cfg.lease_ttl;
-//
-//                 let Some(remaining) = deadline.checked_duration_since(now) else {
-//                     return Self::Init; // already past budget, don't even try
-//                 };
-//
-//                 return match timeout(remaining, ctx.lease.try_acquire(ctx.cfg.lease_ttl)).await {
-//                     Ok(Ok(AcquireOutcome::Acquired(grant))) => Self::Promoting {
-//                         term: grant.term,
-//                         expiry: grant.expires_at,
-//                     },
-//                     // If we timeout, or we error for whatever reason, we should re-init our state.
-//                     _ => Self::Init,
-//                 };
-//             }
-//
-//             Self::Promoting { term, expiry } => {
-//                 let Some(remaining) = expiry.checked_duration_since(now) else {
-//                     return Self::Demoting; // already expired
-//                 };
-//
-//                 // NOTE: We are not really bothered if the promotion fails since we fallback to
-//                 // demoting on failure. Demoting fails hard, and therefore if postgres is busy
-//                 // it will be killed by watchdog.
-//                 match timeout(remaining, ctx.pg.promote()).await {
-//                     Ok(Ok(())) => Self::Leader { term, expiry },
-//                     _ => Self::Demoting,
-//                 }
-//             }
-//
-//             Self::Leader { term, expiry } => {
-//                 if now >= expiry {
-//                     return Self::Demoting; // already expired
-//                 }
-//
-//                 // We renew if we are in the proper range from our expiration.
-//                 if now + ctx.cfg.renew_margin >= expiry {
-//                     let remaining = expiry.saturating_duration_since(now);
-//
-//                     let renew_fut = ctx.lease.renew(ctx.cfg.lease_ttl);
-//
-//                     match timeout(remaining, renew_fut).await {
-//                         Ok(Ok(RenewOutcome::Renewed { expires_at })) => {
-//                             return Self::Leader {
-//                                 term,
-//                                 expiry: expires_at,
-//                             }
-//                         }
-//                         Ok(Ok(RenewOutcome::Lost)) | Ok(Err(_)) | Err(_) => {
-//                             return Self::Demoting;
-//                         }
-//                     }
-//                 }
-//
-//                 Self::Leader { term, expiry }
-//             }
-//
-//             Self::Standby { leader } => {
-//                 // If we are in standby but we are the leader, then we should demote.
-//                 if leader.0 == ctx.cfg.id.0 {
-//                     return Self::Demoting;
-//                 }
-//
-//                 match ctx.lease.observe().await {
-//                     // Update state to new leader regardless
-//                     Ok(LeaseObservation::Leader(id)) => Self::Standby { leader: id },
-//                     // Go to re-election if no leader
-//                     Ok(LeaseObservation::NoLeader) => Self::Electing { since: now },
-//                     // Otherwise go back to init since we don't know the status.
-//                     _ => Self::Init,
-//                 }
-//             }
-//
-//             Self::Demoting => {
-//                 // Should hang if demoting postgres or the lease fails and let watchdog kill the process.
-//                 // Watchdog will also catch if the await hangs indefinitely.
-//
-//                 if ctx.pg.stop().await.is_err() {
-//                     std::future::pending::<()>().await; // never returns
-//                 }
-//
-//                 if ctx.lease.release().await.is_err() {
-//                     std::future::pending::<()>().await; // never returns
-//                 }
-//
-//                 Self::Init
-//             }
-//         }
-//     }
-// }
+pub fn renew_deadline(expiry: Instant, renew_margin: Duration) -> Instant {
+    expiry.checked_sub(renew_margin).unwrap_or(expiry)
+}
