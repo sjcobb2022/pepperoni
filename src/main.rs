@@ -1,10 +1,14 @@
-use pepperoni::lease::NodeId;
 // use pepperoni::mock::{MockLease, MockPg};
 // use pepperoni::proxy::{run_proxy, ProxyHandle};
 // use pepperoni::{Config, Ctx, State};
 
+pub mod lease;
+
+use lease::LeaseGrant;
+
 use std::env;
 use std::error::Error;
+
 // use std::time::{Duration, Instant};
 
 #[tokio::main]
