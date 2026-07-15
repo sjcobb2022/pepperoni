@@ -1,3 +1,5 @@
+//TODO: #![no_std]
+
 use std::time::{Duration, Instant};
 
 pub struct NodeId(String);
