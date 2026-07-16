@@ -1,5 +1,5 @@
 {
-  description = "Build a cargo project";
+  description = "Build a cargo workspace";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -29,7 +29,15 @@
         inherit (pkgs) lib;
 
         craneLib = crane.mkLib pkgs;
-        src = craneLib.cleanCargoSource ./.;
+
+        # cleanCargoSource strips LICENSE (and anything non-cargo) out of src.
+        # Since we use license-file, in cargo, this caused it to fail.
+        src = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.union (craneLib.fileset.commonCargoSources ./.) (
+            lib.fileset.maybeMissing ./LICENSE
+          );
+        };
 
         # Common arguments can be set here to avoid repeating them later
         commonArgs = {
@@ -49,30 +57,73 @@
           # MY_CUSTOM_VAR = "some value";
         };
 
-        # Build *just* the cargo dependencies, so we can reuse
-        # all of that work (e.g. via cachix) when running in CI
+        # Build *just* the cargo dependencies (of the entire workspace),
+        # so we can reuse all of that work (e.g. via cachix) when running in CI
+        # It is *highly* recommended to use something like cargo-hakari to avoid
+        # cache misses when building individual top-level-crates
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        # Build the actual crate itself, reusing the dependency
-        # artifacts from above.
-        pepperoni = craneLib.buildPackage (
+        individualCrateArgs =
           commonArgs
           // {
             inherit cargoArtifacts;
+            inherit (craneLib.crateNameFromCargoToml {inherit src;}) version;
+            # NB: we disable tests since we'll run them all via cargo-nextest
+            doCheck = false;
+          };
+
+        fileSetForCrate = crate:
+          lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./LICENSE
+              (craneLib.fileset.commonCargoSources ./crates/salami)
+              (craneLib.fileset.commonCargoSources crate)
+            ];
+          };
+
+        # Build the top-level crates of the workspace as individual derivations.
+        # This allows consumers to only depend on (and build) only what they need.
+        # Though it is possible to build the entire workspace as a single derivation,
+        # so this is left up to you on how to organize things
+        #
+        # Note that the cargo workspace must define `workspace.members` using wildcards,
+        # otherwise, omitting a crate (like we do below) will result in errors since
+        # cargo won't be able to find the sources for all members.
+
+        # pepperoni is a no_std library crate: it has no binary to install, so
+        # we tell crane to skip the "install binaries" post-build phase.
+        salami = craneLib.buildPackage (
+          individualCrateArgs
+          // {
+            pname = "salami";
+            cargoExtraArgs = "-p salami";
+            src = fileSetForCrate ./crates/salami;
+          }
+        );
+
+        pepperoni = craneLib.buildPackage (
+          individualCrateArgs
+          // {
+            pname = "pepperoni";
+            cargoExtraArgs = "-p pepperoni";
+            src = fileSetForCrate ./crates/ppepperoni;
           }
         );
       in {
         checks = {
-          # Build the crate as part of `nix flake check` for convenience
-          inherit pepperoni;
+          # Build the crates as part of `nix flake check` for convenience
+          inherit pepperoni salami;
 
-          # Run clippy (and deny all warnings) on the crate source,
+          # Run clippy (and deny all warnings) on the workspace source,
           # again, reusing the dependency artifacts from above.
           #
           # Note that this is done as a separate derivation so that
           # we can block the CI if there are issues here, but not
           # prevent downstream consumers from building our crate by itself.
-          pepperoni-clippy = craneLib.cargoClippy (
+          workspace-clippy = craneLib.cargoClippy (
             commonArgs
             // {
               inherit cargoArtifacts;
@@ -80,7 +131,7 @@
             }
           );
 
-          pepperoni-doc = craneLib.cargoDoc (
+          workspace-doc = craneLib.cargoDoc (
             commonArgs
             // {
               inherit cargoArtifacts;
@@ -91,30 +142,30 @@
           );
 
           # Check formatting
-          pepperoni-fmt = craneLib.cargoFmt {
+          workspace-fmt = craneLib.cargoFmt {
             inherit src;
           };
 
-          pepperoni-toml-fmt = craneLib.taploFmt {
+          workspace-toml-fmt = craneLib.taploFmt {
             src = pkgs.lib.sources.sourceFilesBySuffices src [".toml"];
             # taplo arguments can be further customized below as needed
             # taploExtraArgs = "--config ./taplo.toml";
           };
 
           # Audit dependencies
-          pepperoni-audit = craneLib.cargoAudit {
+          workspace-audit = craneLib.cargoAudit {
             inherit src advisory-db;
           };
 
           # Audit licenses
-          pepperoni-deny = craneLib.cargoDeny {
+          workspace-deny = craneLib.cargoDeny {
             inherit src;
           };
 
           # Run tests with cargo-nextest
-          # Consider setting `doCheck = false` on `my-crate` if you do not want
-          # the tests to run twice
-          pepperoni-nextest = craneLib.cargoNextest (
+          # Consider setting `doCheck = false` on other crate derivations
+          # if you do not want the tests to run twice
+          workspace-nextest = craneLib.cargoNextest (
             commonArgs
             // {
               inherit cargoArtifacts;
@@ -126,11 +177,13 @@
         };
 
         packages = {
-          default = pepperoni;
+          inherit pepperoni;
         };
 
-        apps.default = flake-utils.lib.mkApp {
-          drv = pepperoni;
+        apps = {
+          pepperoni = flake-utils.lib.mkApp {
+            drv = pepperoni;
+          };
         };
 
         devShells.default = craneLib.devShell {
@@ -142,9 +195,7 @@
 
           # Extra inputs can be added here; cargo and rustc are provided by default.
           packages = [
-            # pkgs.ripgrep
             pkgs.rust-analyzer
-            pkgs.rustfmt
           ];
         };
       }

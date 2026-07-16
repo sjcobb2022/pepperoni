@@ -1,5 +1,6 @@
 [licenses]
 allow = [
+  "GPL-2.0",
   "MIT",
   "Zlib",
   "Unicode-3.0",
