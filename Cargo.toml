@@ -1,16 +1,15 @@
-[package]
-name = "pepperoni"
+[workspace]
+resolver = "2"
+# Note that we define member crates with a wildcard here and NOT with explicit
+# paths because the flake.nix is written in a way such that top-level members
+# (`my-cli` and `my-server`) are built as different derivations which avoid being
+# rebuilt if the other package's sources change.
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license-file = "./LICENSE"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-sqlx = { version = "0.9", features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"], default-features = false }
-thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["net", "rt-multi-thread", "macros", "io-util", "process"], default-features = false }
-
-# speed up incremental builds
-[profile.dev.package.sqlx-macros]
-opt-level = 3
+[workspace.metadata.crane]
+name = "cured-rs"
