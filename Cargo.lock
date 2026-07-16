@@ -666,6 +666,11 @@ dependencies = [
 [[package]]
 name = "pepperoni"
 version = "0.1.0"
+dependencies = [
+ "sqlx",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -789,11 +794,6 @@ dependencies = [
 [[package]]
 name = "salami"
 version = "0.1.0"
-dependencies = [
- "sqlx",
- "thiserror",
- "tokio",
-]
 
 [[package]]
 name = "scopeguard"
