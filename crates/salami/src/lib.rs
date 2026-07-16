@@ -5,6 +5,12 @@ use core::time::Duration;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct NodeId(u64);
 
+impl NodeId {
+    pub fn from_u64(input: u64) -> Self {
+        NodeId(input)
+    }
+}
+
 pub type Term = u64;
 
 pub struct Config {

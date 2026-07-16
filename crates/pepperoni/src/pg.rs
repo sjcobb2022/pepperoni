@@ -12,7 +12,7 @@ pub enum PgError {
 // sqlx or a regular sql query, which is done asynchronously. Keep things async for the sake of a
 // clean api?
 pub trait PgCtl {
-    async fn stop(&mut self) -> Result<(), PgError>;
-    async fn promote(&mut self) -> Result<(), PgError>;
-    async fn start_standby(&mut self) -> Result<(), PgError>;
+    fn stop(&mut self) -> impl Future<Output = Result<(), PgError>>;
+    fn promote(&mut self) -> impl Future<Output = Result<(), PgError>>;
+    fn start_standby(&mut self) -> impl Future<Output = Result<(), PgError>>;
 }

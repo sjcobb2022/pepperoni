@@ -667,6 +667,7 @@ dependencies = [
 name = "pepperoni"
 version = "0.1.0"
 dependencies = [
+ "salami",
  "sqlx",
  "thiserror",
  "tokio",

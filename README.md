@@ -1,16 +1,16 @@
-# pepperoni
+# cured-rs
 
 WIP
 
-a postgres failover service, like patroni, but hot.
+a collection of crates used to handle postgres failover.
 
-this is both a library and a binary. it is extremely opinionated as to how
-leader election etc should be done.
+[pepperoni](./crates/pepperoni): core binary, like patroni but hot.
+[salami](./crates/salami): library that drives pepperoni.
 
-the library is dependency free, `no_std`, no alloc, and sans-io. the user is
+salami library is dependency free, `no_std`, no alloc, and sans-io. the user is
 encouraged to provide their own runtime.
 
-the core binary uses tokio, etcd, and pgctl commands.
+pepperoni uses tokio, etcd, and pgctl commands.
 
 in the future there will be examples using other async runtimes and various
 other fun things. perhaps some of these features will be introduced into the

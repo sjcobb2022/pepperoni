@@ -109,7 +109,7 @@
           // {
             pname = "pepperoni";
             cargoExtraArgs = "-p pepperoni";
-            src = fileSetForCrate ./crates/ppepperoni;
+            src = fileSetForCrate ./crates/pepperoni;
           }
         );
       in {

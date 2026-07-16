@@ -44,8 +44,11 @@ pub enum LeaseObservation {
 }
 
 pub trait LeaseClient {
-    async fn observe(&mut self) -> Result<LeaseObservation, LeaseError>;
-    async fn try_acquire(&mut self, ttl: Duration) -> Result<AcquireOutcome, LeaseError>;
-    async fn renew(&mut self, ttl: Duration) -> Result<RenewOutcome, LeaseError>;
-    async fn release(&mut self) -> Result<(), LeaseError>;
+    fn observe(&mut self) -> impl Future<Output = Result<LeaseObservation, LeaseError>>;
+    fn try_acquire(
+        &mut self,
+        ttl: Duration,
+    ) -> impl Future<Output = Result<AcquireOutcome, LeaseError>>;
+    fn renew(&mut self, ttl: Duration) -> impl Future<Output = Result<RenewOutcome, LeaseError>>;
+    fn release(&mut self) -> impl Future<Output = Result<(), LeaseError>>;
 }
