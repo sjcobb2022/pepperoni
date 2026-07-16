@@ -5,10 +5,11 @@ WIP
 a collection of crates used to handle postgres failover.
 
 [pepperoni](./crates/pepperoni): core binary, like patroni but hot.
+
 [salami](./crates/salami): library that drives pepperoni.
 
 salami library is dependency free, `no_std`, no alloc, and sans-io. the user is
-encouraged to provide their own runtime.
+encouraged to provide their own runtime, or use pepperoni.
 
 pepperoni uses tokio, etcd, and pgctl commands.
 
