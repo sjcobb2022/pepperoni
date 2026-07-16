@@ -2,5 +2,19 @@
 name = "pepperoni"
 version = "0.1.0"
 edition = "2024"
+license-file.workspace = true
 
 [dependencies]
+sqlx = { version = "0.9", features = [
+  "postgres",
+  "runtime-tokio",
+  "tls-rustls-ring-webpki",
+], default-features = false }
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = [
+  "net",
+  "rt-multi-thread",
+  "macros",
+  "io-util",
+  "process",
+], default-features = false }
