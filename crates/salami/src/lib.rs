@@ -49,6 +49,10 @@ pub enum State {
     ObservingFromInit,
     /// In standby, but observing the leader in case an election has occurred.
     ObservingFromStandby { leader: NodeId },
+    /// We ware
+    AwaitingLsnCheck,
+    /// We know we are not the leader, but the leader is not known yet.
+    DeferringLsn,
     /// In the process of acquiring a lease
     AcquiringLease,
     /// In the process of promoting our current leader.
@@ -81,6 +85,13 @@ pub enum Event {
     ObservedNoLeader,
     /// Failed to observe the leader, try and elect again.
     ObserveFailed,
+
+    /// The current node has the largest LSN value from postgres
+    LsnCheckWon,
+    /// The current node does not have the largest LSN value from postgres.
+    LsnCheckLost,
+    /// The LSN check failed for some reason.
+    LsnCheckFailed,
 
     /// Lease was acquired successfully.
     AcquireSucceeded { term: Term, ttl: Duration },
@@ -117,6 +128,7 @@ pub enum Event {
 pub enum Command {
     ObserveLease,
     TryAcquireLease { ttl: Duration },
+    PublishAndObserveLsn,
     Promote { term: Term },
     RenewLease { term: Term, ttl: Duration },
     StartStandby,
@@ -174,24 +186,23 @@ pub fn step(state: State, event: Event, cfg: &Config) -> (State, Commands) {
 
         // ObservingFromInit
         // If we are observing, and we are the leader, then we should stop since that is a failure
+        // Honestly this should be almost impossible to get.
         (ObservingFromInit, Event::ObservedLeader(id)) if id == cfg.id => {
             (Demoting, Commands::one(Command::StopPg))
         }
-        // otherwise, we move into standby with the leader.
+        // otherwise, we start our postgres in standby.
         (ObservingFromInit, Event::ObservedLeader(id)) => (
             StartingStandby { leader: id },
             Commands::one(Command::StartStandby),
         ),
-        // If there is no leader, or our observation failed, we should try and acquire a lease.
-        // If we do not have a connection to etcd or the etcd cluster as a whole, then then try
-        // acquire will most likely fail.
+        // If there is no leader, try and acquire the lease.
+        // If there is no connection to the quorum, it will most likely fail.
         (ObservingFromInit, Event::ObservedNoLeader) => (
-            AcquiringLease,
-            Commands::two(
-                Command::TryAcquireLease { ttl: cfg.lease_ttl },
-                Command::WakeAfter(cfg.lease_ttl),
-            ),
+            AwaitingLsnCheck,
+            Commands::one(Command::PublishAndObserveLsn),
         ),
+
+        // If we fail to observe a lease, then we should go back to the initial state.
         (ObservingFromInit, Event::ObserveFailed) => {
             (Init, Commands::one(Command::WakeAfter(Duration::ZERO))) // TODO: re-evaluate this
                                                                       // timeout duration
@@ -210,14 +221,11 @@ pub fn step(state: State, event: Event, cfg: &Config) -> (State, Commands) {
             Commands::one(Command::WakeAfter(cfg.timeout)),
         ),
 
-        // If there is no leader, then we should try and become the leader ourselves.
-        // We can be relatively certain that all other nodes are doing the same.
+        // If there is no leader, try and acquire the lease.
+        // We can be relatively certain that most other nodes are doing the same.
         (ObservingFromStandby { .. }, Event::ObservedNoLeader) => (
-            AcquiringLease,
-            Commands::two(
-                Command::TryAcquireLease { ttl: cfg.lease_ttl },
-                Command::WakeAfter(cfg.lease_ttl),
-            ),
+            AwaitingLsnCheck,
+            Commands::one(Command::PublishAndObserveLsn),
         ),
         // We should try and init again if we fail.
         (ObservingFromStandby { .. }, Event::ObserveFailed) => {
@@ -225,6 +233,31 @@ pub fn step(state: State, event: Event, cfg: &Config) -> (State, Commands) {
                                                                       // timeout duration.
         }
         (s @ ObservingFromStandby { .. }, _) => (s, Commands::none()),
+
+        // If the instance has the largest LSN, acquire a lease.
+        (AwaitingLsnCheck, Event::LsnCheckWon) => (
+            AcquiringLease,
+            Commands::two(
+                Command::TryAcquireLease { ttl: cfg.lease_ttl },
+                Command::WakeAfter(cfg.lease_ttl),
+            ),
+        ),
+
+        // If we are not the largest LSN, defer for a timeout, and then try observe the leader again.
+        (AwaitingLsnCheck, Event::LsnCheckLost) => {
+            (DeferringLsn, Commands::one(Command::WakeAfter(cfg.timeout)))
+        }
+
+        (AwaitingLsnCheck, Event::LsnCheckFailed) => {
+            (Init, Commands::one(Command::WakeAfter(Duration::ZERO)))
+        }
+
+        (s @ AwaitingLsnCheck, _) => (s, Commands::none()),
+
+        // When we receive a timeout after deferring, we should try and reinit as another leader
+        // should have been elected.
+        (DeferringLsn, Event::Timeout) => (ObservingFromInit, Commands::one(Command::ObserveLease)),
+        (s @ DeferringLsn, _) => (s, Commands::none()),
 
         // AcquiringLease
         // If we receive a timeout because we have taken too long, then fail back to the initial state.
