@@ -20,5 +20,5 @@ fn node_id_of(name: &str) -> NodeId {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(FNV_PRIME);
     }
-    NodeId::from_u64(hash)
+    NodeId::new(hash)
 }
