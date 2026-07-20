@@ -9,7 +9,7 @@
 //! salami is meant to be (relatively) simple, and made for human consumption.
 //!
 //! It was originally written using a typestate pattern, but was migrated to a set of enums as the
-//! sans-io pattern can become quite unruly.
+//! sans-io pattern can become quite unruly with lots of distinct types.
 
 use core::time::Duration;
 
@@ -249,7 +249,8 @@ pub fn step(state: State, event: Event, cfg: &Config) -> (State, Commands) {
         }
 
         (AwaitingLsnCheck, Event::LsnCheckFailed) => {
-            (Init, Commands::one(Command::WakeAfter(Duration::ZERO)))
+            (Init, Commands::one(Command::WakeAfter(Duration::ZERO))) // TODO: re-evaluate this
+                                                                      // timeout duration.
         }
 
         (s @ AwaitingLsnCheck, _) => (s, Commands::none()),
@@ -322,7 +323,8 @@ pub fn step(state: State, event: Event, cfg: &Config) -> (State, Commands) {
             Commands::one(Command::WakeAfter(cfg.timeout)),
         ),
         (StartingStandby { .. }, Event::StandbyStartFailed) => {
-            (Init, Commands::one(Command::WakeAfter(Duration::ZERO)))
+            (Init, Commands::one(Command::WakeAfter(Duration::ZERO))) // TODO: re-evaluate this
+                                                                      // timeout duration.
         }
         (s @ StartingStandby { .. }, _) => (s, Commands::none()),
 
@@ -343,7 +345,8 @@ pub fn step(state: State, event: Event, cfg: &Config) -> (State, Commands) {
 
         // ReleasingLease
         (ReleasingLease, Event::Released) => {
-            (Init, Commands::one(Command::WakeAfter(Duration::ZERO)))
+            (Init, Commands::one(Command::WakeAfter(Duration::ZERO))) // TODO: re-evaluate this
+                                                                      // timeout duration.
         }
         (ReleasingLease, Event::ReleaseFailed) => (Stuck, Commands::none()),
         (s @ ReleasingLease, _) => (s, Commands::none()),
