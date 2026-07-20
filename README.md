@@ -17,6 +17,8 @@ in the future there will be examples using other async runtimes and various
 other fun things. perhaps some of these features will be introduced into the
 main binary with some dynamic dispatch.
 
+uses [crane](https://github.com/ipetkov/crane) for the rust flake template.
+
 > [!WARNING]
 > This is a learning project and (probably...) should not be used.
 
